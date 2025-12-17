@@ -1,0 +1,70 @@
+"use strict";
+
+// ------------------------------
+// jQuery: Menu toggle, Select2, Char counter, Collapse toggle
+// ------------------------------
+$(document).ready(function () {
+  const isHeaderInitiallyFixed = $('#header').hasClass('fixed-top');
+
+  // Mobile menu open
+  $('#header .menu-icon').on('click', function () {
+    $('.navbar-menu').addClass('open-menu');
+    $('#header .menu-close-icon').removeClass('d-none');
+    $('#header .menu-icon').addClass('d-none');
+    $('body').addClass('no-scroll');
+    $('a.menu-deactive').addClass('d-none');
+    $('a.menu-active').removeClass('d-none');
+
+    if (!isHeaderInitiallyFixed) {
+      $('#header').addClass('fixed-top');
+    }
+  });
+
+  // Mobile menu close
+  $('#header .menu-close-icon').on('click', function () {
+    $('.navbar-menu').removeClass('open-menu');
+    $('#header .menu-close-icon').addClass('d-none');
+    $('#header .menu-icon').removeClass('d-none');
+    $('body').removeClass('no-scroll');
+    $('a.menu-deactive').removeClass('d-none');
+    $('a.menu-active').addClass('d-none');
+
+    if (!isHeaderInitiallyFixed) {
+      $('#header').removeClass('fixed-top');
+    }
+  });
+
+  // Select2 initialization
+  $('.select2').select2({ 
+    theme: 'bootstrap',
+    minimumResultsForSearch: Infinity,
+    width: '100%'
+  });
+
+  // Character counter
+  $('#appealText').on('input', function () {
+    let charCount = $(this).val().length;
+    $('.char-counter span').text(charCount);
+  });
+
+  // Answer collapse toggle
+  $('.answer-collapsed-card .card-collapse').on('click', function (event) {
+    event.preventDefault();
+    const $this = $(this);
+    const container = $this.closest('.answer-collapsed-card');
+    const target = container.find('.answer-container');
+
+    if (target.is(':visible')) {
+      target.slideUp(300, () => target.removeClass('d-flex'));
+    } else {
+      target.addClass('d-flex').hide().slideDown(300);
+    }
+
+    $this.find('.key-icon').toggleClass('active');
+  });
+});
+
+// Modal close on card click
+$(document).on('click', '#gxModal .media-card', function () {
+  $('#gxModal').modal('hide');
+});

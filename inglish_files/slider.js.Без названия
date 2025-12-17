@@ -1,0 +1,140 @@
+"use strict";
+
+const slides = document.querySelectorAll(".slide");
+const bulletsContainer = document.getElementById("bullets");
+
+if(slides.length){
+  slides[0].classList.add("active");
+}
+
+if (slides.length && bulletsContainer) {  
+  let bullets = [];
+  let current = 0;
+  let isAnimating = false;
+  let autoplayInterval;
+
+  function createBullets() {
+    bulletsContainer.innerHTML = "";
+    bullets = [];
+
+    slides.forEach((_, index) => {
+      const button = document.createElement("button");
+      if (index === 0) button.classList.add("active");
+
+      button.addEventListener("click", () => {
+        if (isAnimating || index === current) return;
+        stopAutoplay();
+        bullets.forEach(b => b.classList.remove("active"));
+        button.classList.add("active");
+        showSlide(index);
+      });
+
+      bulletsContainer.appendChild(button);
+      bullets.push(button);
+    });
+  }
+
+  function showSlide(index) {
+    if (index === current || isAnimating) return;
+    isAnimating = true;
+
+    const screenHeight = window.innerHeight;
+    const prevSlide = slides[current];
+    const nextSlide = slides[index];
+
+    const prevLayer = prevSlide.querySelector(".overlay-layer");
+    const nextLayer = nextSlide.querySelector(".overlay-layer");
+    const prevContent = prevLayer?.querySelector(".overlay-content");
+    const nextContent = nextLayer?.querySelector(".overlay-content");
+
+    const isForward = index > current || (current === 0 && index === slides.length - 1);
+    const clipTo = isForward ? "inset(0% 0% 100% 0%)" : "inset(100% 0% 0% 0%)";
+    const clipFrom = isForward ? "inset(100% 0% 0% 0%)" : "inset(0% 0% 100% 0%)";
+
+    nextSlide.classList.add("active");
+
+    gsap.set(nextSlide, { clipPath: clipFrom });
+    gsap.set(nextLayer, { clipPath: clipFrom });
+    if (nextContent) gsap.set(nextContent, { y: isForward ? screenHeight : -screenHeight });
+
+    gsap.to(prevSlide, { clipPath: clipTo, duration: 1.2, ease: "power2.inOut" });
+    gsap.to(prevLayer, { clipPath: clipTo, duration: 1.2, ease: "power2.inOut" });
+    if (prevContent) {
+      gsap.to(prevContent, { y: isForward ? -screenHeight : screenHeight, duration: 1.2, ease: "power2.inOut" });
+    }
+
+    gsap.to(nextSlide, { clipPath: "inset(0% 0% 0% 0%)", duration: 1.2, ease: "power2.inOut" });
+    gsap.to(nextLayer, {
+      clipPath: "inset(0% 0% 0% 0%)",
+      duration: 1.2,
+      ease: "power2.inOut",
+      onComplete: () => {
+        prevSlide.classList.remove("active");
+        current = index;
+        isAnimating = false;
+      }
+    });
+
+    if (nextContent) {
+      const tl = gsap.timeline();
+      tl.to(nextContent, { y: 0, duration: 1.0, ease: "power2.inOut" });
+      const bounceOffset = isForward ? "-10%" : "5%";
+      tl.to(nextContent, {
+        y: bounceOffset,
+        duration: 1,
+        scaleY: 0.95,
+        ease: "power1.out"
+      }, "-=0.5");
+      tl.to(nextContent, {
+        y: "0%",
+        scaleY: 1,
+        duration: 1.2,
+        ease: "power1.inOut"
+      });
+    }
+
+    bullets.forEach(b => b.classList.remove("active"));
+    bullets[index].classList.add("active");
+  }
+
+  function debounce(func, delay) {
+    let timeout;
+    return function () {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => func(), delay);
+    };
+  }
+
+  window.addEventListener("resize", debounce(() => showSlide(current), 300));
+
+  window.addEventListener("wheel", (e) => {
+    if (isAnimating) return;
+    const delta = e.deltaY;
+    const nextIndex = delta > 0 ? (current + 1) % slides.length : (current - 1 + slides.length) % slides.length;
+    bullets[nextIndex]?.click();
+  }, { passive: true });
+
+  let touchStartY = 0;
+  window.addEventListener("touchstart", e => touchStartY = e.touches[0].clientY, { passive: true });
+  window.addEventListener("touchend", e => {
+    if (isAnimating) return;
+    const diff = touchStartY - e.changedTouches[0].clientY;
+    if (Math.abs(diff) > 50) {
+      const nextIndex = diff > 0 ? (current + 1) % slides.length : (current - 1 + slides.length) % slides.length;
+      bullets[nextIndex]?.click();
+    }
+  });
+
+  function startAutoplay(delay = 5000) {
+    autoplayInterval = setInterval(() => {
+      const nextIndex = (current + 1) % slides.length;
+      showSlide(nextIndex);
+    }, delay);
+  }
+  function stopAutoplay() {
+    clearInterval(autoplayInterval);
+  }
+
+  createBullets();
+  startAutoplay();
+}

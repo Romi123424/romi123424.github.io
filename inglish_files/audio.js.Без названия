@@ -1,0 +1,409 @@
+"use strict";
+
+/* ================== Audio Progress (Lightweight) ================== */
+let wavesurfer;
+let skipTime = 10; // saniyə
+
+/* ================== Util ================== */
+function humanizeAz(sec){
+  if (!isFinite(sec) || sec <= 0) return "0 san";
+  sec = Math.floor(sec);
+  var h = Math.floor(sec/3600);
+  var m = Math.floor((sec%3600)/60);
+  var s = sec % 60;
+  var parts = [];
+  if (h > 0) parts.push(h + " saat");
+  if (m > 0) parts.push(m + " deq");
+  if (s > 0 || (h===0 && m===0)) parts.push(s + " san");
+  return parts.join(" ");
+}
+function mmss(seconds){
+  var m = Math.floor(seconds / 60);
+  var s = Math.floor(seconds % 60);
+  return m + ":" + (s < 10 ? "0" : "") + s;
+}
+function setPlayButtonState(isPlaying) {
+  var btn = document.getElementById("btn-playpause");
+  if (!btn) return;
+  var imgs = btn.querySelectorAll("img");
+  if (imgs.length >= 2) {
+    imgs[0].style.display = isPlaying ? "inline" : "none"; // pause.svg
+    imgs[1].style.display = isPlaying ? "none" : "inline"; // play.svg
+  }
+}
+/* total-time yalnız bir dəfə yazılsın */
+function setTotalOnce(el, sec){
+  if (!el || !isFinite(sec) || sec <= 0) return;
+  if (el.dataset && el.dataset.totalFixed === "1") return;
+  el.textContent = humanizeAz(sec);
+  if (el.dataset) el.dataset.totalFixed = "1";
+}
+
+/* ================== Storage helpers ================== */
+const CookieStoreA = {
+  get: function(n){ var m=document.cookie.match(new RegExp('(?:^|; )'+encodeURIComponent(n)+'=([^;]*)')); return m?decodeURIComponent(m[1]):null; },
+  set: function(n,v,days){ if(days===void 0) days=365; var d=new Date(); d.setTime(d.getTime()+days*864e5); document.cookie=encodeURIComponent(n)+"="+encodeURIComponent(v)+";expires="+d.toUTCString()+";path=/;SameSite=Lax"; }
+};
+function aGet(k){ try{return localStorage.getItem(k)??CookieStoreA.get(k);}catch(e){ return CookieStoreA.get(k); } }
+function aSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){ CookieStoreA.set(k,v); } }
+
+/* audio üçün prefixlər – video ilə qarışmır */
+function keyATime(id){ return "audio:"+id+":t"; }   // currentTime
+function keyADur(id){  return "audio:"+id+":d"; }   // duration
+function keyAWatched(id){ return "audio:"+id+":w"; } // "1" -> permanent watched
+
+/* ================== ID & URL ================== */
+function getAudioIdFrom(elOrUrl){
+  if (typeof elOrUrl === "string") return elOrUrl;
+  var id = (elOrUrl.getAttribute && (elOrUrl.getAttribute("data-media-id") || elOrUrl.getAttribute("data-audio"))) ||
+           (elOrUrl.dataset && (elOrUrl.dataset.mediaId || elOrUrl.dataset.audio)) || "";
+  return id.trim();
+}
+function getAudioUrlFrom(el){
+  var url = (el.getAttribute && (el.getAttribute("data-audio") || el.getAttribute("data-src") || el.getAttribute("href"))) ||
+            (el.dataset && (el.dataset.audio || el.dataset.src)) || "";
+  url = (url || "").replace(/&amp;/g,"&").trim();
+  return url || null;
+}
+
+/* ================== Lightweight duration loader (single hidden <audio> + queue) ================== */
+var audioMetaQueue = [];
+var audioMetaBusy = false;
+var metaAudioEl = null;
+
+function ensureMetaAudio() {
+  if (metaAudioEl) return metaAudioEl;
+  var a = document.createElement("audio");
+  a.preload = "metadata";
+  a.style.position = "absolute";
+  a.style.width = "1px";
+  a.style.height = "1px";
+  a.style.opacity = "0";
+  a.style.pointerEvents = "none";
+  document.body.appendChild(a);
+  metaAudioEl = a;
+  return a;
+}
+
+function enqueueAudioDurationLoad(card){
+  var id = getAudioIdFrom(card);
+  var url = getAudioUrlFrom(card);
+  if (!id || !url) return;
+
+  var existing = parseFloat(aGet(keyADur(id)) || "0");
+  if (existing > 0) { setTotalOnce(card.querySelector(".total-time"), existing); return; }
+
+  // artıq növbədədirsə, təkrar etmə
+  for (var i=0;i<audioMetaQueue.length;i++){
+    if (audioMetaQueue[i] && audioMetaQueue[i].id === id) return;
+  }
+  audioMetaQueue.push({ id:id, url:url, card:card });
+  drainAudioMetaQueue();
+}
+
+function drainAudioMetaQueue(){
+  if (audioMetaBusy || audioMetaQueue.length === 0) return;
+  audioMetaBusy = true;
+
+  var job = audioMetaQueue.shift();
+  var id = job.id, url = job.url, card = job.card;
+  var a = ensureMetaAudio();
+
+  var cleanup = function(){
+    a.src = "";
+    a.onloadedmetadata = null;
+    a.onerror = null;
+    audioMetaBusy = false;
+    setTimeout(drainAudioMetaQueue, 0); // növbəti işi başlat
+  };
+
+  a.onloadedmetadata = function(){
+    var dur = a.duration && isFinite(a.duration) ? a.duration : 0;
+    if (dur > 0) {
+      aSet(keyADur(id), String(dur));
+      setTotalOnce(card.querySelector(".total-time"), dur);
+    }
+    cleanup();
+  };
+  a.onerror = cleanup;
+  a.src = url; // metadata yüklə
+}
+
+/* ================== Kart tapıcı (yalnız audio) ================== */
+function findAudioCardById(id){
+  if (!id) return null;
+  var selectorValue = id.replace(/"/g,'\\"');
+  var card = document.querySelector('.media-card[data-audio][data-media-id="' + selectorValue + '"]');
+  if (card) return card;
+  var list = document.querySelectorAll(".media-card[data-audio]");
+  for (var i=0;i<list.length;i++){
+    var c = list[i];
+    if ((c.getAttribute("data-audio")||"").trim() === id) return c;
+  }
+  return null;
+}
+
+/* ================== Kart UI (3 hal + permanent watched) ================== */
+function updateAudioCardById(id){
+  var card = findAudioCardById(id);
+  if (!card) return;
+
+  var savedT = parseFloat(aGet(keyATime(id)) || "0");
+  var savedD = parseFloat(aGet(keyADur(id))  || "0");
+  var watched = aGet(keyAWatched(id)) === "1";
+  var pct = savedD>0 ? Math.max(0, Math.min(100, (savedT/savedD)*100)) : 0;
+
+  var meta = card.querySelector(".media-meta");
+  if (!meta) return;
+
+  var remainEl = card.querySelector(".remaining-time");
+  var progBar  = card.querySelector(".progress-bar");
+  var progFill = progBar ? (progBar.querySelector(".progress-fill") || null) : null;
+  var statusTag= card.querySelector(".status-tag");
+
+  // 1) Həmişəlik Baxılıb (flag) və ya hazırda %>=95
+  if (watched || (savedD > 0 && pct >= 95)) {
+    if (!watched) aSet(keyAWatched(id), "1");
+
+    if (!statusTag) {
+      var leftBox = meta.querySelector(".d-flex.gap-1") || meta.querySelector(".d-flex");
+      if (leftBox) {
+        statusTag = document.createElement("span");
+        statusTag.className = "status-tag";
+        leftBox.insertBefore(statusTag, leftBox.firstChild);
+      }
+    }
+    if (statusTag) statusTag.textContent = "Baxılıb";
+
+    if (remainEl && remainEl.parentNode) remainEl.parentNode.removeChild(remainEl);
+    if (progBar && progBar.parentNode)  progBar.parentNode.removeChild(progBar);
+    return;
+  }
+
+  // 2) Davam edir
+  if (savedD > 0 && pct > 0) {
+    if (statusTag && statusTag.parentNode) statusTag.parentNode.removeChild(statusTag);
+
+    if (!remainEl) {
+      remainEl = document.createElement("div");
+      remainEl.className = "remaining-time";
+      meta.appendChild(remainEl);
+    }
+    var remain = Math.max(0, savedD - savedT);
+    var txt = humanizeAz(remain);
+    remainEl.textContent = (txt === "0 san") ? "" : (txt + " qalıb");
+
+    if (!progBar) {
+      progBar = document.createElement("div");
+      progBar.className = "progress-bar";
+      progBar.innerHTML = '<div class="progress-fill" style="width:0%"></div>';
+      var mc = card.querySelector(".media-content");
+      if (mc) mc.appendChild(progBar);
+      progFill = progBar.querySelector(".progress-fill");
+    } else {
+      progFill = progBar.querySelector(".progress-fill") || progFill;
+    }
+    if (progFill) progFill.style.width = pct.toFixed(1) + "%";
+    return;
+  }
+
+  // 3) Baxılmayıb – status/remaining/progress olmasın
+  if (statusTag && statusTag.parentNode) statusTag.parentNode.removeChild(statusTag);
+  if (remainEl && remainEl.parentNode) remainEl.parentNode.removeChild(remainEl);
+  if (progBar && progBar.parentNode)  progBar.parentNode.removeChild(progBar);
+}
+
+/* Bütün audio kartları yenilə */
+function updateAudioCards(){
+  var list = document.querySelectorAll(".media-card[data-audio]");
+  for (var i=0;i<list.length;i++){
+    var c = list[i];
+    enqueueAudioDurationLoad(c); // lightweight metadata yükü (növbə)
+    var id = getAudioIdFrom(c);
+    if (id) updateAudioCardById(id);
+  }
+}
+
+/* ================== IntersectionObserver: hibrid (ilk 8 dərhal, qalanlar görünəndə) ================== */
+var audioCardIO = new IntersectionObserver(function(entries){
+  for (var i=0;i<entries.length;i++){
+    var entry = entries[i];
+    if (!entry.isIntersecting) continue;
+    var card = entry.target;
+    audioCardIO.unobserve(card);
+    enqueueAudioDurationLoad(card);
+    setTimeout(function(c){ return function(){ updateAudioCardById(getAudioIdFrom(c)); }; }(card), 0);
+  }
+},{ root:null, rootMargin:"200px 0px", threshold:0 });
+
+function bootstrapInitialAudioDurations(){
+  var all = Array.from(document.querySelectorAll(".media-card[data-audio]"));
+  for (var i=0;i<all.length;i++){
+    if (i < 8) enqueueAudioDurationLoad(all[i]);
+    else audioCardIO.observe(all[i]);
+  }
+}
+
+/* ================== MutationObserver: API ilə gələn yeni audio kartlar ================== */
+var moA = new MutationObserver(function(muts){
+  var added = [];
+  for (var mi=0; mi<muts.length; mi++){
+    var m = muts[mi];
+    if (!m.addedNodes) continue;
+    for (var j=0;j<m.addedNodes.length;j++){
+      var n = m.addedNodes[j];
+      if (!(n instanceof Element)) continue;
+      if (n.matches && n.matches(".media-card[data-audio]")) added.push(n);
+      var inner = n.querySelectorAll ? n.querySelectorAll(".media-card[data-audio]") : [];
+      for (var k=0;k<inner.length;k++) added.push(inner[k]);
+    }
+  }
+  if (added.length){
+    for (var a=0;a<added.length;a++){
+      enqueueAudioDurationLoad(added[a]);
+      audioCardIO.observe(added[a]);
+    }
+    clearTimeout(moA._t);
+    moA._t = setTimeout(function(){
+      for (var a=0;a<added.length;a++){
+        var id = getAudioIdFrom(added[a]);
+        if (id) updateAudioCardById(id);
+      }
+    }, 50);
+  }
+});
+
+/* ================== Wavesurfer + Modal (yalnız audioModal) ================== */
+document.addEventListener("DOMContentLoaded", function () {
+  var modal = document.getElementById("audioModal");
+  var currentTimeEl = document.getElementById("current-time");
+  var totalTimeEl = document.getElementById("total-time");
+  var playPauseBtn = document.getElementById("btn-playpause");
+  var btnBackward = document.getElementById("btn-backward");
+  var btnForward = document.getElementById("btn-forward");
+  var btnPrev = document.getElementById("btn-previous");
+  var btnNext = document.getElementById("btn-next");
+
+  // İlk hazırlıq (yüngül)
+  bootstrapInitialAudioDurations();
+  updateAudioCards();
+  moA.observe(document.body, { childList:true, subtree:true });
+
+  if (!modal || !document.getElementById("waveform")) return;
+
+  // Kart klikləri (yalnız audio kartlar)
+  var cards = document.querySelectorAll(".media-card[data-audio]");
+  for (var i=0;i<cards.length;i++){
+    (function(card){
+      card.addEventListener("click", function(){
+        var audioUrl = getAudioUrlFrom(card);
+        var resumeAt = parseFloat(card.getAttribute("data-current-time") || "0");
+        if (!audioUrl) return;
+
+        var onModalShown = function(){
+          if (wavesurfer) { try{ wavesurfer.destroy(); }catch(e){} }
+
+          wavesurfer = WaveSurfer.create({
+            container: "#waveform",
+            progressColor: "#54B285",
+            waveColor: "#D9DADD",
+            height: 64,
+            barWidth: 2,
+            responsive: true,
+            normalize: true
+          });
+
+          wavesurfer.load(audioUrl);
+
+          var audioId = getAudioIdFrom(card) || audioUrl;
+
+          wavesurfer.on("ready", function(){
+            var duration = wavesurfer.getDuration();
+            if (duration && isFinite(duration)) {
+              aSet(keyADur(audioId), String(duration));
+              if (totalTimeEl) totalTimeEl.textContent = mmss(duration);
+              var cardTotal = card.querySelector(".total-time");
+              setTotalOnce(cardTotal, duration); // yalnız bir dəfə yaz
+            }
+
+            var savedT = parseFloat(aGet(keyATime(audioId)) || "0");
+            var startAt = resumeAt > 0 ? resumeAt : (savedT > 0 ? savedT : 0);
+            if (startAt > 0 && duration && startAt < duration) {
+              wavesurfer.seekTo(startAt / duration);
+            }
+
+            if (currentTimeEl) currentTimeEl.textContent = mmss(wavesurfer.getCurrentTime());
+            if (typeof wavesurfer.play === "function") wavesurfer.play();
+            setPlayButtonState(true);
+          });
+
+          var lastSave = 0;
+          var SAVE_INTERVAL_MS = 4000;
+
+          wavesurfer.on("audioprocess", function(){
+            var now = wavesurfer.getCurrentTime();
+            if (currentTimeEl) currentTimeEl.textContent = mmss(now);
+            card.setAttribute("data-current-time", Math.floor(now));
+            var dur = wavesurfer.getDuration() || 0;
+
+            var t = Date.now();
+            if (t - lastSave > SAVE_INTERVAL_MS) {
+              var id = getAudioIdFrom(card) || audioUrl;
+              aSet(keyATime(id), String(now));
+              aSet(keyADur(id), String(dur));
+              if (dur && now / dur >= 0.95) aSet(keyAWatched(id), "1");
+              lastSave = t;
+              updateAudioCardById(id);
+            }
+          });
+
+          wavesurfer.on("seek", function(){
+            if (currentTimeEl) currentTimeEl.textContent = mmss(wavesurfer.getCurrentTime());
+          });
+
+          wavesurfer.on("finish", function(){
+            var dur = wavesurfer.getDuration() || 0;
+            var id = getAudioIdFrom(card) || audioUrl;
+            aSet(keyATime(id), String(dur));
+            aSet(keyADur(id), String(dur));
+            aSet(keyAWatched(id), "1");
+            updateAudioCardById(id);
+            setPlayButtonState(false);
+          });
+
+          modal.removeEventListener("shown.bs.modal", onModalShown);
+        };
+
+        modal.addEventListener("shown.bs.modal", onModalShown);
+      });
+    })(cards[i]);
+  }
+
+  // Play/Pause
+  if (playPauseBtn) {
+    playPauseBtn.addEventListener("click", function(){
+      if (wavesurfer) {
+        wavesurfer.playPause();
+        setPlayButtonState(wavesurfer.isPlaying ? wavesurfer.isPlaying() : false);
+      }
+    });
+  }
+  // Skiplər
+  if (btnBackward) btnBackward.addEventListener("click", function(){ if (wavesurfer && wavesurfer.skip) wavesurfer.skip(-skipTime); });
+  if (btnForward)  btnForward.addEventListener("click",  function(){ if (wavesurfer && wavesurfer.skip) wavesurfer.skip(skipTime);  });
+
+  // Prev/Next – hazırda yalnız console
+  if (btnPrev) btnPrev.addEventListener("click", function(){ console.log("Previous track"); });
+  if (btnNext) btnNext.addEventListener("click", function(){ console.log("Next track"); });
+
+  // Modal bağlananda təmizlik + UI update
+  modal.addEventListener("hidden.bs.modal", function(){
+    if (wavesurfer) { try{ wavesurfer.destroy(); }catch(e){} wavesurfer = null; }
+    setPlayButtonState(false);
+    if (currentTimeEl) currentTimeEl.textContent = "0:00";
+    if (totalTimeEl) totalTimeEl.textContent = "0:00";
+    var waveform = document.getElementById("waveform");
+    if (waveform) waveform.innerHTML = "";
+    updateAudioCards(); // təhlükəsizlik üçün kartları yenilə
+  });
+});

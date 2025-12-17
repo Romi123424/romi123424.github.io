@@ -1,0 +1,390 @@
+"use strict";
+
+let player;
+
+const CookieStoreV = {
+  get: function(n){ var m=document.cookie.match(new RegExp('(?:^|; )'+encodeURIComponent(n)+'=([^;]*)')); return m?decodeURIComponent(m[1]):null; },
+  set: function(n,v,days){ if(days===void 0) days=365; var d=new Date(); d.setTime(d.getTime()+days*864e5); document.cookie=encodeURIComponent(n)+"="+encodeURIComponent(v)+";expires="+d.toUTCString()+";path=/;SameSite=Lax"; }
+};
+function vGet(k){ try{return localStorage.getItem(k)??CookieStoreV.get(k);}catch(e){ return CookieStoreV.get(k); } }
+function vSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){ CookieStoreV.set(k,v); } }
+
+function keyTime(id){ return "media:"+id+":t"; }  // currentTime
+function keyDur(id){  return "media:"+id+":d"; }  // duration
+function keyWatched(id){ return "media:"+id+":w"; } // "1" -> permanent watched
+
+function getVideoIdFrom(elOrUrl){
+  if (typeof elOrUrl === "string") return elOrUrl;
+  return (elOrUrl.getAttribute && (elOrUrl.getAttribute("data-media-id") || elOrUrl.getAttribute("data-video"))) ||
+         (elOrUrl.dataset && (elOrUrl.dataset.mediaId || elOrUrl.dataset.video)) || "";
+}
+function getVideoUrlFrom(el){
+  var url = (el.getAttribute && (el.getAttribute("data-video") || el.getAttribute("data-src") || el.getAttribute("href"))) ||
+            (el.dataset && (el.dataset.video || el.dataset.src)) || "";
+  url = (url || "").replace(/&amp;/g,"&").trim();
+  return url || null;
+}
+function humanizeAz(sec){
+  if (!isFinite(sec) || sec <= 0) return "0 san";
+  sec = Math.floor(sec);
+  var h = Math.floor(sec/3600);
+  var m = Math.floor((sec%3600)/60);
+  var s = sec % 60;
+  var parts = [];
+  if (h > 0) parts.push(h + " saat");
+  if (m > 0) parts.push(m + " deq");
+  if (s > 0 || (h===0 && m===0)) parts.push(s + " san");
+  return parts.join(" ");
+}
+function setTotalOnce(el, sec){
+  if (!el || !isFinite(sec) || sec <= 0) return;
+  if (el.dataset && el.dataset.totalFixed === "1") return; // artıq yazılıb
+  el.textContent = humanizeAz(sec);
+  if (el.dataset) el.dataset.totalFixed = "1";
+}
+
+const metaQueue = [];
+let metaBusy = false;
+let metaVideoEl = null;
+
+function ensureMetaVideo() {
+  if (metaVideoEl) return metaVideoEl;
+  var v = document.createElement("video");
+  v.preload = "metadata";
+  v.muted = true; v.playsInline = true;
+  v.style.position = "absolute";
+  v.style.width = "1px";
+  v.style.height = "1px";
+  v.style.opacity = "0";
+  v.style.pointerEvents = "none";
+  document.body.appendChild(v);
+  metaVideoEl = v;
+  return v;
+}
+
+function enqueueDurationLoad(card){
+  var id = getVideoIdFrom(card);
+  var url = getVideoUrlFrom(card);
+  if (!id || !url) return;
+
+  var existing = parseFloat(vGet(keyDur(id)) || "0");
+  if (existing > 0) { setTotalOnce(card.querySelector(".total-time"), existing); return; }
+
+  // kart artıq növbədədirsə təkrar əlavə etmə
+  if (metaQueue.some(function(x){ return x && x.id === id; })) return;
+
+  metaQueue.push({ id:id, url:url, card:card });
+  drainMetaQueue();
+}
+
+function drainMetaQueue(){
+  if (metaBusy || metaQueue.length === 0) return;
+  metaBusy = true;
+
+  var job = metaQueue.shift();
+  var id = job.id, url = job.url, card = job.card;
+  var v = ensureMetaVideo();
+
+  var cleanup = function(){
+    v.src = "";
+    v.onloadedmetadata = null;
+    v.onerror = null;
+    metaBusy = false;
+    // Növbəti işi UI-nı bloklamadan başlat
+    setTimeout(drainMetaQueue, 0);
+  };
+
+  v.onloadedmetadata = function(){
+    var dur = v.duration && isFinite(v.duration) ? v.duration : 0;
+    if (dur > 0) {
+      vSet(keyDur(id), String(dur));
+      setTotalOnce(card.querySelector(".total-time"), dur);
+    }
+    cleanup();
+  };
+  v.onerror = cleanup;
+  v.src = url; // metadata yüklə
+}
+
+function findVideoCardById(id){
+  if(!id) return null;
+  var list = document.querySelectorAll(".media-card[data-video]");
+  for (var i=0;i<list.length;i++){
+    var c = list[i];
+    var cid = (c.getAttribute("data-media-id") || c.getAttribute("data-video") || "").trim();
+    if (cid === id) return c;
+  }
+  return null;
+}
+
+function updateVideoCardById(id){
+  var card = findVideoCardById(id);
+  if(!card) return;
+
+  var savedT = parseFloat(vGet(keyTime(id)) || "0");
+  var savedD = parseFloat(vGet(keyDur(id))  || "0");
+  var watched = vGet(keyWatched(id)) === "1";
+  var pct = savedD > 0 ? Math.min(100, (savedT / savedD) * 100) : 0;
+
+  var meta = card.querySelector(".media-meta");
+  if(!meta) return;
+
+  var remainEl = card.querySelector(".remaining-time");
+  var progBar  = card.querySelector(".progress-bar");
+  var progFill = progBar ? (progBar.querySelector(".progress-fill") || null) : null;
+  var statusTag= card.querySelector(".status-tag");
+
+  // 1) Həmişəlik Baxılıb və ya hazırda %>=95
+  if (watched || (savedD > 0 && pct >= 95)) {
+    if (!watched) vSet(keyWatched(id), "1");
+
+    if (!statusTag) {
+      var leftBox = meta.querySelector(".d-flex.gap-1") || meta.querySelector(".d-flex");
+      if (leftBox) {
+        statusTag = document.createElement("span");
+        statusTag.className = "status-tag";
+        leftBox.insertBefore(statusTag, leftBox.firstChild);
+      }
+    }
+    if (statusTag) statusTag.textContent = "Baxılıb";
+
+    if (remainEl && remainEl.parentNode) remainEl.parentNode.removeChild(remainEl);
+    if (progBar && progBar.parentNode)  progBar.parentNode.removeChild(progBar);
+    return;
+  }
+
+  // 2) Davam edir
+  if (savedD > 0 && pct > 0) {
+    if (statusTag && statusTag.parentNode) statusTag.parentNode.removeChild(statusTag);
+
+    if (!remainEl) {
+      remainEl = document.createElement("div");
+      remainEl.className = "remaining-time";
+      meta.appendChild(remainEl);
+    }
+    var remain = Math.max(0, savedD - savedT);
+    var txt = humanizeAz(remain);
+    remainEl.textContent = (txt === "0 san") ? "" : (txt + " qalıb");
+
+    if (!progBar) {
+      progBar = document.createElement("div");
+      progBar.className = "progress-bar";
+      progBar.innerHTML = '<div class="progress-fill" style="width:0%"></div>';
+      var mc = card.querySelector(".media-content");
+      if (mc) mc.appendChild(progBar);
+      progFill = progBar.querySelector(".progress-fill");
+    } else {
+      progFill = progBar.querySelector(".progress-fill") || progFill;
+    }
+    if (progFill) progFill.style.width = pct.toFixed(1) + "%";
+    return;
+  }
+
+  // 3) Baxılmayıb – status/remaining/progress olmasın
+  if (statusTag && statusTag.parentNode) statusTag.parentNode.removeChild(statusTag);
+  if (remainEl && remainEl.parentNode) remainEl.parentNode.removeChild(remainEl);
+  if (progBar && progBar.parentNode)  progBar.parentNode.removeChild(progBar);
+}
+
+function updateVideoCards(){
+  var list = document.querySelectorAll(".media-card[data-video]");
+  for (var i=0;i<list.length;i++){
+    var c = list[i];
+    enqueueDurationLoad(c);
+    var id = getVideoIdFrom(c);
+    if (id) updateVideoCardById(id);
+  }
+}
+
+var videoCardIO = new IntersectionObserver(function(entries){
+  for (var i=0;i<entries.length;i++){
+    var entry = entries[i];
+    if (!entry.isIntersecting) continue;
+    var card = entry.target;
+    videoCardIO.unobserve(card);
+    enqueueDurationLoad(card);
+    // metadata yazıldıqdan sonra UI update üçün biraz gecikme
+    setTimeout(function(c){ return function(){ updateVideoCardById(getVideoIdFrom(c)); }; }(card), 0);
+  }
+},{ root:null, rootMargin:"200px 0px", threshold:0 });
+
+function bootstrapInitialDurations(){
+  var all = Array.from(document.querySelectorAll(".media-card[data-video]"));
+  // İlk 8 kart -> dərhal; qalanlar -> görünəndə
+  for (var i=0;i<all.length;i++){
+    if (i < 8) enqueueDurationLoad(all[i]);
+    else videoCardIO.observe(all[i]);
+  }
+}
+
+var moV = new MutationObserver(function(muts){
+  var added = [];
+  for (var mi=0; mi<muts.length; mi++){
+    var m = muts[mi];
+    if (!m.addedNodes) continue;
+    for (var j=0;j<m.addedNodes.length;j++){
+      var n = m.addedNodes[j];
+      if (!(n instanceof Element)) continue;
+      if (n.matches && n.matches(".media-card[data-video]")) added.push(n);
+      var inner = n.querySelectorAll ? n.querySelectorAll(".media-card[data-video]") : [];
+      for (var k=0;k<inner.length;k++) added.push(inner[k]);
+    }
+  }
+  if (added.length){
+    for (var a=0;a<added.length;a++) {
+      enqueueDurationLoad(added[a]);
+      videoCardIO.observe(added[a]);
+    }
+    clearTimeout(moV._t);
+    moV._t = setTimeout(function(){
+      for (var a=0;a<added.length;a++){
+        var id = getVideoIdFrom(added[a]);
+        if (id) updateVideoCardById(id);
+      }
+    }, 50);
+  }
+});
+
+function findVideoUrlFromTrigger(trigger){
+  var carrier =
+    (trigger.closest && trigger.closest("[data-video]")) ||
+    (trigger.querySelector && trigger.querySelector("[data-video]")) ||
+    trigger;
+
+  var url =
+    (carrier.dataset && (carrier.dataset.video || carrier.dataset.src)) ||
+    (carrier.getAttribute && (carrier.getAttribute("data-video") || carrier.getAttribute("data-src") || carrier.getAttribute("href"))) ||
+    "";
+
+  url = (url || "").replace(/&amp;/g,"&").trim();
+  return url || null;
+}
+function loadSavedStart(id,fallbackStart,realDuration){
+  if (fallbackStart===void 0) fallbackStart = 0;
+  var savedT = parseFloat(vGet(keyTime(id)) || "0");
+  var savedD = parseFloat(vGet(keyDur(id))  || "0");
+  if (realDuration && savedD && Math.abs(savedD - realDuration) > 1) return fallbackStart || 0;
+  return savedT > 0 ? savedT : (fallbackStart || 0);
+}
+function flushSave(el,id){
+  if(!el) return;
+  vSet(keyTime(id), String(el.currentTime || 0));
+  vSet(keyDur(id),  String(el.duration   || 0));
+}
+
+document.addEventListener("DOMContentLoaded", function(){
+  bootstrapInitialDurations();  // ilk 8 dərhal, qalanlar görünəndə
+  updateVideoCards();           // status/progress 
+  moV.observe(document.body, { childList:true, subtree:true });
+
+  var modal = document.getElementById("videoModal");
+  if (!modal) return;
+
+  var overlay = modal.querySelector(".play-overlay");
+  var modalContent = modal.querySelector(".modal-content");
+
+  // boş link kliklərinin qarşısını al
+  document.addEventListener("click", function(e){
+    var trigger = e.target.closest ? e.target.closest("[data-bs-target='#videoModal']") : null;
+    if (!trigger) return;
+    if (trigger.matches && trigger.matches("a[href='#']")) e.preventDefault();
+  });
+
+  var activeMediaId = null;
+  var saveThrottleTs = 0;
+  var SAVE_INTERVAL_MS = 4000;
+
+  modal.addEventListener("show.bs.modal", function(e){
+    var trigger = e.relatedTarget;
+    if (!trigger) return;
+
+    var videoUrl = findVideoUrlFromTrigger(trigger);
+    var fallbackStart = parseFloat(trigger.getAttribute("data-current-time") || "0");
+    if (!videoUrl) { console.warn("Video tapılmadı.", trigger); return; }
+
+    // Köhnəni təmizlə
+    if (player) { try{player.destroy();}catch(_e){} player=null; }
+    var olds = modal.querySelectorAll("video#modal-video");
+    for (var oi=0; oi<olds.length; oi++){ try{olds[oi].pause();}catch(_e){} olds[oi].remove(); }
+
+    // Yeni video
+    var v = document.createElement("video");
+    v.id = "modal-video";
+    v.className = "plyr w-100 rounded-4";
+    v.setAttribute("preload","metadata");
+    v.setAttribute("playsinline","");
+    v.setAttribute("controls","");
+    var s = document.createElement("source");
+    s.src = videoUrl;
+    s.type = /\.webm(\?|$)/i.test(videoUrl) ? "video/webm" : "video/mp4";
+    v.appendChild(s);
+
+    var container = modal.querySelector(".position-relative") || modalContent;
+    if (overlay && container.contains(overlay)) container.insertBefore(v, overlay);
+    else container.appendChild(v);
+
+    activeMediaId = getVideoIdFrom(trigger) || videoUrl;
+
+    player = new Plyr(v, {
+      seekTime: 15,
+      controls: ['rewind','play','fast-forward','progress','current-time','duration','mute','volume','fullscreen']
+    });
+
+    // total-time
+    var card = findVideoCardById(activeMediaId) || { querySelector: function(){ return null; } };
+    var ensureDur = function(){
+      var dur = v.duration && isFinite(v.duration) ? v.duration : 0;
+      if (dur > 0) {
+        vSet(keyDur(activeMediaId), String(dur));
+        var totalEl = card.querySelector ? card.querySelector(".total-time") : null;
+        setTotalOnce(totalEl, dur);
+      }
+    };
+
+    v.addEventListener("loadedmetadata", function(){
+      ensureDur();
+      var start = loadSavedStart(activeMediaId, fallbackStart, v.duration);
+      if (start > 0 && start < (v.duration || Infinity)) v.currentTime = start;
+    });
+
+    v.addEventListener("timeupdate", function(){
+      var now = Date.now();
+      if (now - saveThrottleTs > SAVE_INTERVAL_MS) {
+        vSet(keyTime(activeMediaId), String(v.currentTime || 0));
+        vSet(keyDur(activeMediaId),  String(v.duration   || 0));
+        if (v.duration && v.currentTime / v.duration >= 0.95) vSet(keyWatched(activeMediaId),'1');
+        saveThrottleTs = now;
+        updateVideoCardById(activeMediaId);
+      }
+    });
+
+    v.addEventListener("ended", function(){
+      vSet(keyTime(activeMediaId), String(v.duration || 0));
+      vSet(keyDur(activeMediaId),  String(v.duration || 0));
+      vSet(keyWatched(activeMediaId),'1'); // permanent
+      updateVideoCardById(activeMediaId);
+    });
+
+    var visHandler = function(){ if (document.hidden) { flushSave(v, activeMediaId); updateVideoCardById(activeMediaId); } };
+    document.addEventListener("visibilitychange", visHandler);
+
+    modal.addEventListener("hidden.bs.modal", function(){
+      flushSave(v, activeMediaId);
+      setTimeout(function(){ updateVideoCardById(activeMediaId); }, 0);
+
+      if (player) { try{player.destroy();}catch(_e){} player=null; }
+      v.remove();
+      document.removeEventListener("visibilitychange", visHandler);
+      activeMediaId = null;
+    }, { once:true });
+
+    if (overlay) {
+      overlay.addEventListener("click", function overlayOnce(){
+        overlay.style.display = "none";
+        modal.classList.remove("hide-controls");
+        if (player) player.play();
+        overlay.removeEventListener("click", overlayOnce);
+      });
+    }
+  });
+});
